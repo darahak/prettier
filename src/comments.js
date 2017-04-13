@@ -902,7 +902,7 @@ function printTrailingComment(commentPath, print, options, parentNode) {
     );
   }
 
-  return concat([lineSuffix(" " + contents), !isBlock ? breakParent : ""]);
+  return concat([lineSuffix(" " + contents), breakParent]);
 }
 
 function printTrailingCommentBlock(commentPath, print, options) {
