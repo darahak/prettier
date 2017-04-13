@@ -8,6 +8,7 @@ var isObject = types.builtInTypes.object;
 var docBuilders = require("./doc-builders");
 var fromString = docBuilders.fromString;
 var concat = docBuilders.concat;
+var line = docBuilders.line;
 var hardline = docBuilders.hardline;
 var breakParent = docBuilders.breakParent;
 var indent = docBuilders.indent;
@@ -769,6 +770,37 @@ function handleVariableDeclaratorComments(
   return false;
 }
 
+function removeCurrentIndent(commentBlock) {
+  const loc = commentBlock.loc;
+  if (loc && loc.start && loc.end) {
+    if (loc.start.line === loc.end.line) {
+      return commentBlock.value;
+    }
+
+    const originIndent = loc.start.column;
+    const [first, ...lines] = commentBlock.value.split("\n");
+
+    const cleanLines = lines.map((line) => {
+      const leadingWhitespaceMatches = line.match(/^\s+/);
+      const lineIndent = leadingWhitespaceMatches
+        ? leadingWhitespaceMatches[0].length
+        : 0;
+
+      if (lineIndent === 0) {
+        return " " + line;
+      }
+
+      return line.slice(
+        lineIndent > originIndent
+          ? originIndent
+          : lineIndent - 1
+      );
+    });
+
+    return [first, ...cleanLines].join("\n");
+  }
+}
+
 function printComment(commentPath) {
   const comment = commentPath.getValue();
   comment.printed = true;
@@ -776,7 +808,8 @@ function printComment(commentPath) {
   switch (comment.type) {
     case "CommentBlock":
     case "Block":
-      return "/*" + comment.value + "*/";
+      const blockValue = removeCurrentIndent(comment);
+      return "/*" + blockValue + "*/";
     case "CommentLine":
     case "Line":
       return "//" + comment.value;
@@ -815,33 +848,41 @@ function getExpressionRange(expr) {
 }
 
 function printLeadingComment(commentPath, print, options) {
+  const contents = printComment(commentPath);
+  return concat([contents, hardline]);
+}
+
+function printLeadingCommentBlock(commentPath, print, options) {
   const comment = commentPath.getValue();
   const contents = printComment(commentPath);
   const text = options.originalText;
-  const isBlock = comment.type === "Block" || comment.type === "CommentBlock";
+  const lines = contents.split("\n");
 
-  // Leading block comments should see if they need to stay on the
-  // same line or not.
-  if (isBlock) {
-    return concat([
-      contents,
-      util.hasNewline(options.originalText, locEnd(comment)) ? hardline : " "
-    ]);
-  }
+  let results = [];
+  lines.forEach((currentLine, index) => {
+    const isLastLine = index === lines.length - 1;
 
-  return concat([contents, hardline]);
+    if (isLastLine) {
+      results.push(concat([
+        currentLine,
+        util.hasNewline(text, locEnd(comment)) ? hardline : " "
+      ]));
+    } else {
+      results.push(concat([
+        currentLine,
+        hardline
+      ]));
+    }
+  })
+  return results;
 }
 
 function printTrailingComment(commentPath, print, options, parentNode) {
   const comment = commentPath.getValue();
   const contents = printComment(commentPath);
-  const isBlock = comment.type === "Block" || comment.type === "CommentBlock";
+  const text = options.originalText;
 
-  if (
-    util.hasNewline(options.originalText, locStart(comment), {
-      backwards: true
-    })
-  ) {
+  if (util.hasNewline(text, locStart(comment), { backwards: true })) {
     // This allows comments at the end of nested structures:
     // {
     //   x: 1,
@@ -854,20 +895,46 @@ function printTrailingComment(commentPath, print, options, parentNode) {
     // if this a comment on its own line; normal trailing comments are
     // always at the end of another expression.
 
-    const isLineBeforeEmpty = util.isPreviousLineEmpty(
-      options.originalText,
-      comment
-    );
+    const isLineBeforeEmpty = util.isPreviousLineEmpty(text, comment);
 
     return lineSuffix(
       concat([hardline, isLineBeforeEmpty ? hardline : "", contents])
     );
-  } else if (isBlock) {
-    // Trailing block comments never need a newline
-    return concat([" ", contents]);
   }
 
   return concat([lineSuffix(" " + contents), !isBlock ? breakParent : ""]);
+}
+
+function printTrailingCommentBlock(commentPath, print, options) {
+  const comment = commentPath.getValue();
+  const contents = printComment(commentPath);
+  const text = options.originalText;
+  const lines = contents.split("\n");
+
+  let results = [];
+  lines.forEach((currentLine, index) => {
+    const isFirstLine = index === 0;
+    const isLastLine = index === lines.length - 1;
+
+    if (isFirstLine) {
+      // Trailing block comments never need a newline
+      results.push(concat([
+        lines.length === 1 ? " " : hardline,
+        currentLine,
+        hardline
+      ]));
+    } else if (isLastLine) {
+      results.push(concat([
+        currentLine
+      ]));
+    } else {
+      results.push(concat([
+        currentLine,
+        hardline
+      ]));
+    }
+  })
+  return results;
 }
 
 function printDanglingComments(path, options, sameIndent) {
@@ -890,10 +957,16 @@ function printDanglingComments(path, options, sameIndent) {
     return "";
   }
 
+  let splitParts = [];
+  parts.forEach(part => {
+    const lines = part.split("\n");
+    splitParts.push(...lines);
+  });
+
   if (sameIndent) {
-    return join(hardline, parts);
+    return join(hardline, splitParts);
   }
-  return indent(concat([hardline, join(hardline, parts)]));
+  return indent(concat([hardline, join(hardline, splitParts)]));
 }
 
 function printComments(path, print, options) {
@@ -914,17 +987,31 @@ function printComments(path, print, options) {
     var leading = types.getFieldValue(comment, "leading");
     var trailing = types.getFieldValue(comment, "trailing");
 
+    const isBlock = comment.type === "Block" || comment.type === "CommentBlock";
+
     if (leading) {
-      leadingParts.push(printLeadingComment(commentPath, print, options));
+      if (isBlock) {
+        leadingParts = leadingParts.concat(
+          printLeadingCommentBlock(commentPath, print, options)
+        );
+      } else {
+        leadingParts.push(printLeadingComment(commentPath, print, options));
+      }
 
       const text = options.originalText;
       if (util.hasNewline(text, util.skipNewline(text, util.locEnd(comment)))) {
         leadingParts.push(hardline);
       }
     } else if (trailing) {
-      trailingParts.push(
-        printTrailingComment(commentPath, print, options, parent)
-      );
+      if (isBlock) {
+        trailingParts = trailingParts.concat(
+          printTrailingCommentBlock(commentPath, print, options)
+        );
+      } else {
+        trailingParts.push(
+          printTrailingComment(commentPath, print, options, parent)
+        );
+      }
     }
   }, "comments");
 
